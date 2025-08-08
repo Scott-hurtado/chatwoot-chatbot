@@ -27,11 +27,47 @@ class ChatwootService {
         this.baseURL = process.env.CHATWOOT_URL || '';
         this.apiToken = process.env.CHATWOOT_API_ACCESS_TOKEN || '';
         this.inboxIdentifier = process.env.CHATWOOT_INBOX_IDENTIFIER || '';
-        this.accountId = '1'; // Por defecto, pero se puede obtener dinámicamente
+        this.accountId = '130781'; // Tu account ID actual
         
         if (!this.baseURL || !this.apiToken || !this.inboxIdentifier) {
             console.error('❌ Variables de Chatwoot no configuradas correctamente');
         }
+    }
+
+    /**
+     * Formatear número de teléfono al formato E164
+     */
+    private formatPhoneToE164(phoneNumber: string): string {
+        // Limpiar el número de espacios y caracteres especiales
+        let cleanNumber = phoneNumber.replace(/[\s\-\(\)]/g, '');
+        
+        // Si ya tiene +, devolverlo tal como está
+        if (cleanNumber.startsWith('+')) {
+            return cleanNumber;
+        }
+        
+        // Si el número comienza con 521 (México con código de celular)
+        if (cleanNumber.startsWith('521')) {
+            return `+${cleanNumber}`;
+        }
+        
+        // Si el número comienza con 52 (México)
+        if (cleanNumber.startsWith('52')) {
+            return `+${cleanNumber}`;
+        }
+        
+        // Si es un número de 10 dígitos (probablemente México sin código de país)
+        if (cleanNumber.length === 10) {
+            return `+521${cleanNumber}`;
+        }
+        
+        // Si es un número de 12 dígitos que comienza con 52
+        if (cleanNumber.length === 12 && cleanNumber.startsWith('52')) {
+            return `+${cleanNumber}`;
+        }
+        
+        // Por defecto, agregar + si no lo tiene
+        return `+${cleanNumber}`;
     }
 
     private getHeaders() {
@@ -47,31 +83,27 @@ class ChatwootService {
     async getAccountInfo(): Promise<any> {
         try {
             console.log(`🔍 Obteniendo info de cuenta desde: ${this.baseURL}/api/v1/profile`);
-            console.log(`🔑 Con headers:`, this.getHeaders());
             
             const response = await axios.get(
                 `${this.baseURL}/api/v1/profile`,
                 { headers: this.getHeaders() }
             );
             
-            console.log(`📋 Respuesta completa del perfil:`, JSON.stringify(response.data, null, 2));
+            console.log(`📋 Perfil obtenido exitosamente`);
             
             // Obtener el account_id desde la respuesta
             if (response.data && response.data.accounts && response.data.accounts.length > 0) {
                 this.accountId = response.data.accounts[0].id.toString();
                 console.log(`✅ Account ID obtenido: ${this.accountId}`);
-            } else {
-                console.warn(`⚠️ No se encontraron cuentas en la respuesta`);
             }
             
             return response.data;
         } catch (error: any) {
-            console.error('❌ Error completo obteniendo info de cuenta:', {
+            console.error('❌ Error obteniendo info de cuenta:', {
                 status: error.response?.status,
                 statusText: error.response?.statusText,
                 data: error.response?.data,
-                message: error.message,
-                url: `${this.baseURL}/api/v1/profile`
+                message: error.message
             });
             throw error;
         }
@@ -82,17 +114,17 @@ class ChatwootService {
      */
     async createOrUpdateContact(phoneNumber: string, name?: string): Promise<any> {
         try {
-            console.log(`🔍 Intentando crear contacto para: ${phoneNumber}`);
+            // Formatear número al formato E164
+            const formattedPhone = this.formatPhoneToE164(phoneNumber);
+            console.log(`🔍 Creando contacto - Original: ${phoneNumber}, Formateado: ${formattedPhone}`);
             
             const contactData: ChatwootContact = {
-                identifier: phoneNumber,
+                identifier: formattedPhone,
                 name: name || phoneNumber,
-                phone_number: phoneNumber
+                phone_number: formattedPhone
             };
 
             console.log(`📤 Datos del contacto:`, JSON.stringify(contactData, null, 2));
-            console.log(`🌐 URL: ${this.baseURL}/api/v1/accounts/${this.accountId}/contacts`);
-            console.log(`🔑 Headers:`, this.getHeaders());
 
             const response = await axios.post(
                 `${this.baseURL}/api/v1/accounts/${this.accountId}/contacts`,
@@ -100,10 +132,10 @@ class ChatwootService {
                 { headers: this.getHeaders() }
             );
 
-            console.log(`✅ Contacto creado exitosamente:`, response.data);
+            console.log(`✅ Contacto creado exitosamente para ${formattedPhone}`);
             return response.data;
         } catch (error: any) {
-            console.error(`❌ Error completo:`, {
+            console.error(`❌ Error creando contacto:`, {
                 status: error.response?.status,
                 statusText: error.response?.statusText,
                 data: error.response?.data,
@@ -112,7 +144,8 @@ class ChatwootService {
             
             if (error.response?.status === 422) {
                 console.log(`🔍 Contacto ya existe, buscando...`);
-                return await this.findContactByPhone(phoneNumber);
+                const formattedPhone = this.formatPhoneToE164(phoneNumber);
+                return await this.findContactByPhone(formattedPhone);
             }
             throw error;
         }
@@ -123,15 +156,21 @@ class ChatwootService {
      */
     async findContactByPhone(phoneNumber: string): Promise<any> {
         try {
+            const formattedPhone = this.formatPhoneToE164(phoneNumber);
+            console.log(`🔍 Buscando contacto para: ${formattedPhone}`);
+            
             const response = await axios.get(
-                `${this.baseURL}/api/v1/accounts/${this.accountId}/contacts/search?q=${phoneNumber}`,
+                `${this.baseURL}/api/v1/accounts/${this.accountId}/contacts/search?q=${encodeURIComponent(formattedPhone)}`,
                 { headers: this.getHeaders() }
             );
 
             const contacts = response.data.payload;
             if (contacts && contacts.length > 0) {
+                console.log(`✅ Contacto encontrado: ${contacts[0].id}`);
                 return contacts[0];
             }
+            
+            console.log(`❌ No se encontró contacto para: ${formattedPhone}`);
             return null;
         } catch (error: any) {
             console.error('❌ Error buscando contacto:', error.response?.data || error.message);
@@ -144,17 +183,16 @@ class ChatwootService {
      */
     async createConversation(contactId: number, phoneNumber: string): Promise<any> {
         try {
-            console.log(`🔍 Creando conversación para contacto ID: ${contactId}, teléfono: ${phoneNumber}`);
-            console.log(`📋 Inbox ID: ${this.inboxIdentifier} (tipo: ${typeof this.inboxIdentifier})`);
+            const formattedPhone = this.formatPhoneToE164(phoneNumber);
+            console.log(`🔍 Creando conversación para contacto ID: ${contactId}, teléfono: ${formattedPhone}`);
             
             const conversationData = {
-                source_id: phoneNumber,
-                inbox_id: this.inboxIdentifier, // NO usar parseInt, mantener como string
+                source_id: formattedPhone,
+                inbox_id: parseInt(this.inboxIdentifier), // Convertir a número
                 contact_id: contactId
             };
 
             console.log(`📤 Datos de conversación:`, JSON.stringify(conversationData, null, 2));
-            console.log(`🌐 URL: ${this.baseURL}/api/v1/accounts/${this.accountId}/conversations`);
 
             const response = await axios.post(
                 `${this.baseURL}/api/v1/accounts/${this.accountId}/conversations`,
@@ -162,19 +200,14 @@ class ChatwootService {
                 { headers: this.getHeaders() }
             );
 
-            console.log(`✅ Conversación creada exitosamente:`, response.data);
+            console.log(`✅ Conversación creada exitosamente: ${response.data.id}`);
             return response.data;
         } catch (error: any) {
-            console.error('❌ Error completo creando conversación:', {
+            console.error('❌ Error creando conversación:', {
                 status: error.response?.status,
                 statusText: error.response?.statusText,
                 data: error.response?.data,
-                message: error.message,
-                requestData: {
-                    source_id: phoneNumber,
-                    inbox_id: this.inboxIdentifier,
-                    contact_id: contactId
-                }
+                message: error.message
             });
             throw error;
         }
@@ -196,7 +229,7 @@ class ChatwootService {
                 { headers: this.getHeaders() }
             );
 
-            console.log(`✅ Mensaje entrante enviado a Chatwoot`);
+            console.log(`✅ Mensaje entrante enviado a Chatwoot (Conversación: ${conversationId})`);
             return response.data;
         } catch (error: any) {
             console.error('❌ Error enviando mensaje entrante:', error.response?.data || error.message);
@@ -233,27 +266,28 @@ class ChatwootService {
      */
     async findConversationByPhone(phoneNumber: string): Promise<any> {
         try {
-            console.log(`🔍 Buscando conversación para: ${phoneNumber} en inbox: ${this.inboxIdentifier}`);
+            const formattedPhone = this.formatPhoneToE164(phoneNumber);
+            console.log(`🔍 Buscando conversación para: ${formattedPhone}`);
             
             const response = await axios.get(
                 `${this.baseURL}/api/v1/accounts/${this.accountId}/conversations?status=open&inbox_id=${this.inboxIdentifier}`,
                 { headers: this.getHeaders() }
             );
 
-            console.log(`📋 Respuesta de búsqueda de conversaciones:`, JSON.stringify(response.data, null, 2));
-
             const conversations = response.data.data?.payload || [];
-            const conversation = conversations.find((conv: any) => 
-                conv.meta?.sender?.phone_number === phoneNumber ||
-                conv.meta?.sender?.identifier === phoneNumber ||
-                conv.contact?.phone_number === phoneNumber ||
-                conv.contact?.identifier === phoneNumber
-            );
+            const conversation = conversations.find((conv: any) => {
+                const contactPhone = conv.meta?.sender?.phone_number || conv.contact?.phone_number;
+                if (contactPhone) {
+                    const formattedContactPhone = this.formatPhoneToE164(contactPhone);
+                    return formattedContactPhone === formattedPhone;
+                }
+                return false;
+            });
 
             if (conversation) {
-                console.log(`✅ Conversación encontrada:`, conversation.id);
+                console.log(`✅ Conversación encontrada: ${conversation.id}`);
             } else {
-                console.log(`ℹ️ No se encontró conversación existente para: ${phoneNumber}`);
+                console.log(`ℹ️ No se encontró conversación existente para: ${formattedPhone}`);
             }
 
             return conversation || null;
@@ -268,6 +302,8 @@ class ChatwootService {
      */
     async processMessage(phoneNumber: string, message: string, userName?: string): Promise<boolean> {
         try {
+            console.log(`📨 Procesando mensaje de ${phoneNumber}: ${message.substring(0, 50)}...`);
+            
             // 1. Crear o encontrar contacto
             let contact = await this.findContactByPhone(phoneNumber);
             if (!contact) {
@@ -293,6 +329,7 @@ class ChatwootService {
             // 3. Enviar mensaje entrante
             await this.sendIncomingMessage(conversation.id, message);
 
+            console.log(`✅ Mensaje procesado exitosamente para ${phoneNumber}`);
             return true;
         } catch (error) {
             console.error('❌ Error procesando mensaje en Chatwoot:', error);
@@ -315,4 +352,4 @@ class ChatwootService {
     }
 }
 
-export default new ChatwootService(); 
+export default new ChatwootService();
