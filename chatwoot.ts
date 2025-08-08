@@ -17,6 +17,27 @@ interface ChatwootMessage {
     content_type?: 'text' | 'input_email' | 'cards' | 'input_select' | 'form' | 'article';
 }
 
+interface ChatwootContactResponse {
+    payload: {
+        contact: {
+            id: number;
+            name: string;
+            phone_number: string;
+            email?: string;
+            additional_attributes: any;
+            custom_attributes: any;
+        };
+        contact_inbox: {
+            source_id: string;
+            inbox: {
+                id: number;
+                name: string;
+                channel_type: string;
+            };
+        };
+    };
+}
+
 class ChatwootService {
     private baseURL: string;
     private apiToken: string;
@@ -27,7 +48,7 @@ class ChatwootService {
         this.baseURL = process.env.CHATWOOT_URL || '';
         this.apiToken = process.env.CHATWOOT_API_ACCESS_TOKEN || '';
         this.inboxIdentifier = process.env.CHATWOOT_INBOX_IDENTIFIER || '';
-        this.accountId = '130781'; // Tu account ID actual
+        this.accountId = '130781'; // Tu account ID
         
         if (!this.baseURL || !this.apiToken || !this.inboxIdentifier) {
             console.error('❌ Variables de Chatwoot no configuradas correctamente');
@@ -82,24 +103,24 @@ class ChatwootService {
      */
     async getAccountInfo(): Promise<any> {
         try {
-            console.log(`🔍 Obteniendo info de cuenta desde: ${this.baseURL}/api/v1/profile`);
+            console.log(`🔍 Verificando conexión con Chatwoot...`);
             
             const response = await axios.get(
                 `${this.baseURL}/api/v1/profile`,
                 { headers: this.getHeaders() }
             );
             
-            console.log(`📋 Perfil obtenido exitosamente`);
+            console.log(`✅ Conexión exitosa con Chatwoot`);
             
-            // Obtener el account_id desde la respuesta
-            if (response.data && response.data.accounts && response.data.accounts.length > 0) {
+            // Actualizar account_id si está disponible
+            if (response.data?.accounts?.length > 0) {
                 this.accountId = response.data.accounts[0].id.toString();
-                console.log(`✅ Account ID obtenido: ${this.accountId}`);
+                console.log(`✅ Account ID actualizado: ${this.accountId}`);
             }
             
             return response.data;
         } catch (error: any) {
-            console.error('❌ Error obteniendo info de cuenta:', {
+            console.error('❌ Error verificando conexión con Chatwoot:', {
                 status: error.response?.status,
                 statusText: error.response?.statusText,
                 data: error.response?.data,
@@ -110,30 +131,47 @@ class ChatwootService {
     }
 
     /**
-     * Crear o actualizar un contacto en Chatwoot
+     * Crear contacto con inbox association
      */
-    async createOrUpdateContact(phoneNumber: string, name?: string): Promise<any> {
+    async createContactWithInbox(phoneNumber: string, name?: string): Promise<any> {
         try {
-            // Formatear número al formato E164
             const formattedPhone = this.formatPhoneToE164(phoneNumber);
-            console.log(`🔍 Creando contacto - Original: ${phoneNumber}, Formateado: ${formattedPhone}`);
+            console.log(`🔍 Creando contacto con inbox - Phone: ${formattedPhone}`);
             
-            const contactData: ChatwootContact = {
-                identifier: formattedPhone,
+            const contactData = {
+                inbox_id: this.inboxIdentifier,
                 name: name || phoneNumber,
-                phone_number: formattedPhone
+                phone_number: formattedPhone,
+                identifier: formattedPhone
             };
 
             console.log(`📤 Datos del contacto:`, JSON.stringify(contactData, null, 2));
 
-            const response = await axios.post(
+            const response = await axios.post<ChatwootContactResponse>(
                 `${this.baseURL}/api/v1/accounts/${this.accountId}/contacts`,
                 contactData,
                 { headers: this.getHeaders() }
             );
 
-            console.log(`✅ Contacto creado exitosamente para ${formattedPhone}`);
-            return response.data;
+            if (response.data?.payload?.contact) {
+                const contact = response.data.payload.contact;
+                const contactInbox = response.data.payload.contact_inbox;
+                
+                console.log(`✅ Contacto creado exitosamente:`, {
+                    id: contact.id,
+                    phone: contact.phone_number,
+                    name: contact.name,
+                    source_id: contactInbox?.source_id
+                });
+                
+                return {
+                    contact: contact,
+                    contact_inbox: contactInbox
+                };
+            } else {
+                console.error('❌ Respuesta inesperada del servidor:', response.data);
+                return null;
+            }
         } catch (error: any) {
             console.error(`❌ Error creando contacto:`, {
                 status: error.response?.status,
@@ -142,11 +180,13 @@ class ChatwootService {
                 message: error.message
             });
             
+            // Si el error es 422, el contacto ya existe
             if (error.response?.status === 422) {
                 console.log(`🔍 Contacto ya existe, buscando...`);
                 const formattedPhone = this.formatPhoneToE164(phoneNumber);
                 return await this.findContactByPhone(formattedPhone);
             }
+            
             throw error;
         }
     }
@@ -164,10 +204,21 @@ class ChatwootService {
                 { headers: this.getHeaders() }
             );
 
-            const contacts = response.data.payload;
+            const contacts = response.data?.payload || [];
             if (contacts && contacts.length > 0) {
-                console.log(`✅ Contacto encontrado: ${contacts[0].id}`);
-                return contacts[0];
+                const contact = contacts[0];
+                console.log(`✅ Contacto encontrado: ${contact.id}`);
+                
+                // Obtener el contact_inbox para este contacto
+                const contactInboxes = contact.contact_inboxes || [];
+                const relevantInbox = contactInboxes.find((ci: any) => 
+                    ci.inbox.id.toString() === this.inboxIdentifier
+                );
+                
+                return {
+                    contact: contact,
+                    contact_inbox: relevantInbox
+                };
             }
             
             console.log(`❌ No se encontró contacto para: ${formattedPhone}`);
@@ -181,14 +232,14 @@ class ChatwootService {
     /**
      * Crear una conversación en Chatwoot
      */
-    async createConversation(contactId: number, phoneNumber: string): Promise<any> {
+    async createConversation(contactId: number, phoneNumber: string, sourceId?: string): Promise<any> {
         try {
             const formattedPhone = this.formatPhoneToE164(phoneNumber);
-            console.log(`🔍 Creando conversación para contacto ID: ${contactId}, teléfono: ${formattedPhone}`);
+            console.log(`🔍 Creando conversación para contacto ID: ${contactId}`);
             
             const conversationData = {
-                source_id: formattedPhone,
-                inbox_id: parseInt(this.inboxIdentifier), // Convertir a número
+                source_id: sourceId || formattedPhone,
+                inbox_id: parseInt(this.inboxIdentifier),
                 contact_id: contactId
             };
 
@@ -229,34 +280,10 @@ class ChatwootService {
                 { headers: this.getHeaders() }
             );
 
-            console.log(`✅ Mensaje entrante enviado a Chatwoot (Conversación: ${conversationId})`);
+            console.log(`✅ Mensaje entrante enviado (Conv: ${conversationId})`);
             return response.data;
         } catch (error: any) {
             console.error('❌ Error enviando mensaje entrante:', error.response?.data || error.message);
-            throw error;
-        }
-    }
-
-    /**
-     * Enviar mensaje saliente desde Chatwoot
-     */
-    async sendOutgoingMessage(conversationId: number, message: string): Promise<any> {
-        try {
-            const messageData: ChatwootMessage = {
-                content: message,
-                message_type: 'outgoing'
-            };
-
-            const response = await axios.post(
-                `${this.baseURL}/api/v1/accounts/${this.accountId}/conversations/${conversationId}/messages`,
-                messageData,
-                { headers: this.getHeaders() }
-            );
-
-            console.log(`✅ Mensaje saliente enviado desde Chatwoot`);
-            return response.data;
-        } catch (error: any) {
-            console.error('❌ Error enviando mensaje saliente:', error.response?.data || error.message);
             throw error;
         }
     }
@@ -274,7 +301,7 @@ class ChatwootService {
                 { headers: this.getHeaders() }
             );
 
-            const conversations = response.data.data?.payload || [];
+            const conversations = response.data?.data?.payload || [];
             const conversation = conversations.find((conv: any) => {
                 const contactPhone = conv.meta?.sender?.phone_number || conv.contact?.phone_number;
                 if (contactPhone) {
@@ -286,11 +313,11 @@ class ChatwootService {
 
             if (conversation) {
                 console.log(`✅ Conversación encontrada: ${conversation.id}`);
+                return conversation;
             } else {
-                console.log(`ℹ️ No se encontró conversación existente para: ${formattedPhone}`);
+                console.log(`ℹ️ No se encontró conversación abierta para: ${formattedPhone}`);
+                return null;
             }
-
-            return conversation || null;
         } catch (error: any) {
             console.error('❌ Error buscando conversación:', error.response?.data || error.message);
             return null;
@@ -298,39 +325,53 @@ class ChatwootService {
     }
 
     /**
-     * Procesar mensaje completo (crear contacto, conversación y enviar mensaje)
+     * Procesar mensaje completo con mejor manejo de errores
      */
     async processMessage(phoneNumber: string, message: string, userName?: string): Promise<boolean> {
         try {
             console.log(`📨 Procesando mensaje de ${phoneNumber}: ${message.substring(0, 50)}...`);
             
-            // 1. Crear o encontrar contacto
-            let contact = await this.findContactByPhone(phoneNumber);
-            if (!contact) {
-                contact = await this.createOrUpdateContact(phoneNumber, userName);
+            // 1. Buscar conversación existente primero
+            let conversation = await this.findConversationByPhone(phoneNumber);
+            
+            if (conversation) {
+                // Si ya existe conversación, enviar el mensaje directamente
+                await this.sendIncomingMessage(conversation.id, message);
+                console.log(`✅ Mensaje enviado a conversación existente: ${conversation.id}`);
+                return true;
+            }
+            
+            // 2. Si no hay conversación, crear contacto y conversación
+            let contactData = await this.findContactByPhone(phoneNumber);
+            
+            if (!contactData) {
+                contactData = await this.createContactWithInbox(phoneNumber, userName);
             }
 
-            if (!contact) {
+            if (!contactData || !contactData.contact) {
                 console.error('❌ No se pudo crear/encontrar el contacto');
                 return false;
             }
 
-            // 2. Buscar conversación existente o crear nueva
-            let conversation = await this.findConversationByPhone(phoneNumber);
-            if (!conversation) {
-                conversation = await this.createConversation(contact.id, phoneNumber);
-            }
+            // 3. Crear nueva conversación
+            const sourceId = contactData.contact_inbox?.source_id;
+            conversation = await this.createConversation(
+                contactData.contact.id, 
+                phoneNumber, 
+                sourceId
+            );
 
             if (!conversation) {
-                console.error('❌ No se pudo crear/encontrar la conversación');
+                console.error('❌ No se pudo crear la conversación');
                 return false;
             }
 
-            // 3. Enviar mensaje entrante
+            // 4. Enviar mensaje a la nueva conversación
             await this.sendIncomingMessage(conversation.id, message);
 
             console.log(`✅ Mensaje procesado exitosamente para ${phoneNumber}`);
             return true;
+            
         } catch (error) {
             console.error('❌ Error procesando mensaje en Chatwoot:', error);
             return false;
@@ -343,10 +384,10 @@ class ChatwootService {
     async testConnection(): Promise<boolean> {
         try {
             await this.getAccountInfo();
-            console.log('✅ Conexión con Chatwoot exitosa');
+            console.log('✅ Test de conexión con Chatwoot exitoso');
             return true;
         } catch (error: any) {
-            console.error('❌ Error conectando con Chatwoot:', error.response?.data || error.message);
+            console.error('❌ Fallo test de conexión con Chatwoot:', error.response?.data || error.message);
             return false;
         }
     }
